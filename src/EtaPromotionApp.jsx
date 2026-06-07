@@ -1318,8 +1318,19 @@ function AdminMission(props) {
         if (!last) {
           pick = sorted[0];
         } else {
-          var lastIndex = sorted.findIndex(function(m) { return m.id === last.member_id; });
-          pick = sorted[(lastIndex + 1 + sorted.length) % sorted.length];
+          var countMap = {};
+          sorted.forEach(function(m) { countMap[m.id] = 0; });
+          history.forEach(function(a) {
+            if (countMap[a.member_id] != null) countMap[a.member_id] += 1;
+          });
+          var minCount = Math.min.apply(null, sorted.map(function(m) { return countMap[m.id] || 0; }));
+          var maxCount = Math.max.apply(null, sorted.map(function(m) { return countMap[m.id] || 0; }));
+          if (minCount < maxCount) {
+            pick = sorted.find(function(m) { return (countMap[m.id] || 0) === minCount; }) || sorted[0];
+          } else {
+            var lastIndex = sorted.findIndex(function(m) { return m.id === last.member_id; });
+            pick = sorted[(lastIndex + 1 + sorted.length) % sorted.length];
+          }
         }
       }
       if (pick) picks.push(pick.id);
