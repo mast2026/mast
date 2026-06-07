@@ -91,7 +91,11 @@ function fmtDate(iso) {
 }
 function fmtTime(iso) {
   if (!iso) return "";
-  try { return new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }); }
+  try {
+    var d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+  }
   catch(e) { return ""; }
 }
 function inputDateFromIsoKST(iso) {
@@ -1356,7 +1360,7 @@ function AdminMission(props) {
       setPostTitle(postTitleOf(r1.data));
       setPostBody(postBodyOf(r1.data));
       setDeadlineDate(r1.data.due_at ? new Date(r1.data.due_at).toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" }) : addDaysKST(today, 1));
-      setDeadline(r1.data.due_at ? fmtTime(r1.data.due_at) : "02:00");
+      setDeadline(r1.data.due_at ? inputTimeFromIsoKST(r1.data.due_at) : "02:00");
       var ar = await supabase.from("promotion_mission_assignments").select("member_id").eq("mission_id", r1.data.id);
       setSelected(new Set((ar.data || []).map(function(a) { return a.member_id; })));
       setAutoPickApplied(true);
