@@ -1460,23 +1460,50 @@ function AdminMission(props) {
   }, {})).map(function(group) {
     var sorted = sortMembersByKoreanName(group.members);
     if (sorted.length < 3) return null;
-    var history = assignmentHistory.filter(function(a) { return schoolKey(a.school) === schoolKey(group.school); });
-    if (!history.length) return null;
-    var countMap = {};
-    sorted.forEach(function(m) { countMap[m.id] = 0; });
-    history.forEach(function(a) {
-      if (countMap[a.member_id] != null) countMap[a.member_id] += 1;
+    var history = assignmentHistory.filter(function(a) {
+      return schoolKey(a.school) === schoolKey(group.school);
+    }).slice().sort(function(a, b) {
+      return String(a.mission_date || "").localeCompare(String(b.mission_date || ""));
     });
-    var counts = sorted.map(function(m) { return countMap[m.id] || 0; });
-    var minCount = Math.min.apply(null, counts);
-    var maxCount = Math.max.apply(null, counts);
-    if (minCount >= maxCount) return null;
+    if (!history.length) return null;
+    var skippedMap = {};
+    var orderIndex = {};
+    sorted.forEach(function(m, idx) { orderIndex[m.id] = idx; });
+    function addSkippedBetween(prevId, nextId, reason) {
+      var prevIndex = orderIndex[prevId];
+      var nextIndex = orderIndex[nextId];
+      if (prevIndex == null || nextIndex == null || prevIndex === nextIndex) return;
+      var expected = (prevIndex + 1) % sorted.length;
+      if (expected === nextIndex) return;
+      var cursor = expected;
+      var guard = 0;
+      while (cursor !== nextIndex && guard < sorted.length) {
+        var skippedMember = sorted[cursor];
+        skippedMap[skippedMember.id] = Object.assign({}, skippedMember, { skip_reason: reason });
+        cursor = (cursor + 1) % sorted.length;
+        guard += 1;
+      }
+    }
+    for (var hi = 1; hi < history.length; hi++) {
+      addSkippedBetween(
+        history[hi - 1].member_id,
+        history[hi].member_id,
+        fmtShortDate(history[hi].mission_date) + " 배정 전 순서 건너뜀"
+      );
+    }
+    var todaySelected = sorted.filter(function(m) { return selected.has(m.id); });
+    if (todaySelected.length) {
+      var last = history[history.length - 1];
+      addSkippedBetween(last.member_id, todaySelected[0].id, "오늘 선택에서 순서 건너뜀");
+    }
+    var candidates = Object.values(skippedMap).sort(function(a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""), "ko");
+    });
+    if (!candidates.length) return null;
     return {
       school: group.school,
-      minCount: minCount,
-      maxCount: maxCount,
-      candidates: sorted.filter(function(m) { return (countMap[m.id] || 0) === minCount; }),
-      members: sorted.map(function(m) { return Object.assign({}, m, { mission_count: countMap[m.id] || 0 }); })
+      candidates: candidates,
+      members: sorted.map(function(m, idx) { return Object.assign({}, m, { order_no: idx + 1 }); })
     };
   }).filter(Boolean).sort(function(a, b) {
     return String(a.school || "").localeCompare(String(b.school || ""), "ko");
@@ -1770,12 +1797,12 @@ function AdminMission(props) {
 
       {missingOpen && (
         <Modal onClose={function() { setMissingOpen(false); }} maxWidth={720}>
-          <div style={{ fontSize: 20, fontWeight: 900, color: "#071C59", marginBottom: 8 }}>누락 후보 확인</div>
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#071C59", marginBottom: 8 }}>순서 누락 확인</div>
           <div style={{ fontSize: 13, color: SUB, fontWeight: 800, lineHeight: 1.6, marginBottom: 14 }}>
-            학교 안에서 미션 배정 횟수가 가장 적은 부원입니다. 수동 선정이 필요하면 이름 옆 버튼으로 오늘 대상자에 추가할 수 있습니다.
+            가나다 순서상 선정됐어야 했는데 다음 사람으로 넘어간 부원입니다. 수동 선정이 필요하면 이름 옆 버튼으로 오늘 대상자에 추가할 수 있습니다.
           </div>
           {missingRotationRows.length === 0 ? (
-            <div style={{ padding: 20, borderRadius: 16, background: "#F8FAFF", color: SUB, fontSize: 13, fontWeight: 800, textAlign: "center" }}>현재 누락 후보가 없습니다.</div>
+            <div style={{ padding: 20, borderRadius: 16, background: "#F8FAFF", color: SUB, fontSize: 13, fontWeight: 800, textAlign: "center" }}>현재 순서상 누락 후보가 없습니다.</div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 520, overflow: "auto" }}>
               {missingRotationRows.map(function(row) {
@@ -1783,7 +1810,7 @@ function AdminMission(props) {
                   <div key={row.school} style={{ border: "1px solid #E5EAF2", borderRadius: 16, padding: 14, background: "#fff" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", marginBottom: 10 }}>
                       <div style={{ fontSize: 15, fontWeight: 900, color: INK }}>{row.school}</div>
-                      <div style={{ fontSize: 11, color: "#C65A00", fontWeight: 900 }}>최소 {row.minCount}회 · 최대 {row.maxCount}회</div>
+                      <div style={{ fontSize: 11, color: "#C65A00", fontWeight: 900 }}>가나다 순서 누락 {row.candidates.length}명</div>
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
                       {row.candidates.map(function(m) {
@@ -1795,12 +1822,21 @@ function AdminMission(props) {
                         );
                       })}
                     </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 }}>
+                      {row.candidates.map(function(m) {
+                        return (
+                          <div key={m.id + "_reason"} style={{ fontSize: 11, color: SUB, fontWeight: 800 }}>
+                            {m.name}: {m.skip_reason}
+                          </div>
+                        );
+                      })}
+                    </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                       {row.members.map(function(m) {
                         var isCandidate = row.candidates.some(function(c) { return c.id === m.id; });
                         return (
                           <span key={m.id} style={{ borderRadius: 999, background: isCandidate ? "#FFF7E8" : "#F3F6FB", color: isCandidate ? "#C65A00" : "#66728A", padding: "5px 8px", fontSize: 11, fontWeight: 800 }}>
-                            {m.name} {m.mission_count}회
+                            {m.order_no}. {m.name}
                           </span>
                         );
                       })}
