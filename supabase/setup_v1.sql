@@ -357,7 +357,7 @@ grant select on public.promotion_member_progress_view to anon, authenticated;
 grant select on public.promotion_mission_progress_view to anon, authenticated;
 
 grant insert, update on public.promotion_proofs to anon, authenticated;
-grant select, insert, update on public.promotion_mission_assignments to anon, authenticated;
+grant select, insert, update, delete on public.promotion_mission_assignments to anon, authenticated;
 grant select on public.promotion_proofs to anon, authenticated;
 
 -- Phase-1 admin-code app support.

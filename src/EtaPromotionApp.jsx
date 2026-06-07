@@ -128,6 +128,15 @@ function useWindowWidth() {
   }, []);
   return winW;
 }
+function useNowMs(intervalMs) {
+  var _now = useState(function() { return Date.now(); });
+  var now = _now[0], setNow = _now[1];
+  useEffect(function() {
+    var timer = setInterval(function() { setNow(Date.now()); }, intervalMs || 60000);
+    return function() { clearInterval(timer); };
+  }, [intervalMs]);
+  return now;
+}
 
 var ST = { PENDING: "pending", SUBMITTED: "submitted", APPROVED: "approved", LATE: "late", MISSED: "missed", REJECTED: "rejected", EXEMPTED: "exempted" };
 var STATUS_VALUES = [ST.PENDING, ST.SUBMITTED, ST.APPROVED, ST.LATE, ST.MISSED, ST.REJECTED, ST.EXEMPTED];
@@ -435,6 +444,7 @@ function MemberHome(props) {
   var _loading = useState(true), loading = _loading[0], setLoading = _loading[1];
   var _showAllAssignees = useState(false), showAllAssignees = _showAllAssignees[0], setShowAllAssignees = _showAllAssignees[1];
   var _copyMsg = useState(""), copyMsg = _copyMsg[0], setCopyMsg = _copyMsg[1];
+  var nowMs = useNowMs(60000);
 
   var load = useCallback(async function() {
     setLoading(true);
@@ -466,7 +476,7 @@ function MemberHome(props) {
   var missingCount = Math.max(0, assignees.length - submittedCount);
   var dueLeftText = "마감까지 -";
   if (mission && mission.due_at) {
-    var diff = new Date(mission.due_at).getTime() - Date.now();
+    var diff = new Date(mission.due_at).getTime() - nowMs;
     if (diff > 0) {
       var h = Math.floor(diff / 3600000);
       var mm = Math.floor((diff % 3600000) / 60000);
@@ -1073,6 +1083,7 @@ function AdminDashboard(props) {
   var _members = useState([]), members = _members[0], setMembers = _members[1];
   var _loading = useState(true), loading = _loading[0], setLoading = _loading[1];
   var _cd = useState(""), cd = _cd[0], setCd = _cd[1];
+  var nowMs = useNowMs(60000);
 
   var load = useCallback(async function() {
     setLoading(true);
@@ -1115,7 +1126,7 @@ function AdminDashboard(props) {
   var pendingProofs = assigneeMembers.filter(function(p) { return p.status === ST.SUBMITTED; });
   var notSubmitted = assigneeMembers.filter(function(m) { return m.status === ST.PENDING || m.status === ST.MISSED || m.status === ST.REJECTED; });
   var missionPeriodText = mission ? fmtShortDate(today) + " ~ " + fmtShortDate(mission.due_at) + " " + fmtTime(mission.due_at) : "";
-  var msToDue = mission && mission.due_at ? new Date(mission.due_at).getTime() - Date.now() : null;
+  var msToDue = mission && mission.due_at ? new Date(mission.due_at).getTime() - nowMs : null;
   var urgentDue = msToDue != null && msToDue > 0 && msToDue <= 60 * 60 * 1000;
 
   return (
@@ -1261,6 +1272,7 @@ function AdminMission(props) {
   var _imgFile = useState(null), imgFile = _imgFile[0], setImgFile = _imgFile[1];
   var _imgPreview = useState(null), imgPreview = _imgPreview[0], setImgPreview = _imgPreview[1];
   var _previewOpen = useState(false), previewOpen = _previewOpen[0], setPreviewOpen = _previewOpen[1];
+  var _missingOpen = useState(false), missingOpen = _missingOpen[0], setMissingOpen = _missingOpen[1];
   var _draftMsg = useState(""), draftMsg = _draftMsg[0], setDraftMsg = _draftMsg[1];
   var imgRef = useRef(null);
 
@@ -1351,6 +1363,15 @@ function AdminMission(props) {
     setRotationHint("학교별 자동 추천: " + result.ids.length + "명" + (result.skipped.length ? " · 제외 " + result.skipped.length + "개 학교" : ""));
   }
 
+  function toggleSelectedMember(memberId) {
+    setSelected(function(prev) {
+      var n = new Set(prev);
+      if (n.has(memberId)) n.delete(memberId);
+      else n.add(memberId);
+      return n;
+    });
+  }
+
   var load = useCallback(async function() {
     var r1 = await supabase.from("promotion_missions").select("*").eq("mission_date", today).maybeSingle();
     if (r1.data) {
@@ -1429,6 +1450,38 @@ function AdminMission(props) {
   }).sort(function(a, b) {
     return String(a.school || "").localeCompare(String(b.school || ""), "ko");
   });
+  var missingRotationRows = Object.values(members.filter(function(m) {
+    return (m.status || "active") === "active";
+  }).reduce(function(map, m) {
+    var key = schoolKey(m.school);
+    if (!map[key]) map[key] = { school: m.school, members: [] };
+    map[key].members.push(m);
+    return map;
+  }, {})).map(function(group) {
+    var sorted = sortMembersByKoreanName(group.members);
+    if (sorted.length < 3) return null;
+    var history = assignmentHistory.filter(function(a) { return schoolKey(a.school) === schoolKey(group.school); });
+    if (!history.length) return null;
+    var countMap = {};
+    sorted.forEach(function(m) { countMap[m.id] = 0; });
+    history.forEach(function(a) {
+      if (countMap[a.member_id] != null) countMap[a.member_id] += 1;
+    });
+    var counts = sorted.map(function(m) { return countMap[m.id] || 0; });
+    var minCount = Math.min.apply(null, counts);
+    var maxCount = Math.max.apply(null, counts);
+    if (minCount >= maxCount) return null;
+    return {
+      school: group.school,
+      minCount: minCount,
+      maxCount: maxCount,
+      candidates: sorted.filter(function(m) { return (countMap[m.id] || 0) === minCount; }),
+      members: sorted.map(function(m) { return Object.assign({}, m, { mission_count: countMap[m.id] || 0 }); })
+    };
+  }).filter(Boolean).sort(function(a, b) {
+    return String(a.school || "").localeCompare(String(b.school || ""), "ko");
+  });
+  var missingCandidateCount = missingRotationRows.reduce(function(sum, row) { return sum + row.candidates.length; }, 0);
 
   function pickImage(e) {
     var f = e.target.files ? e.target.files[0] : null;
@@ -1631,6 +1684,7 @@ function AdminMission(props) {
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                 <button style={btnSmall({ background: "#E8F0FE", color: BLUE, border: "1px solid #C8D8F6", borderRadius: 10 })} onClick={applyRotationPick}>학교별 자동 선택</button>
+                <button style={btnSmall({ background: missingCandidateCount ? "#FFF7E8" : "#F8FAFF", color: missingCandidateCount ? "#C65A00" : SUB, border: "1px solid " + (missingCandidateCount ? "#F6D8A8" : "#DDE4F0"), borderRadius: 10 })} onClick={function() { setMissingOpen(true); }}>누락 확인{missingCandidateCount ? " " + missingCandidateCount : ""}</button>
                 <button style={btnSmall({ background: "#F8FAFF", border: "1px solid #DDE4F0", borderRadius: 10 })} onClick={function() { setSelected(new Set(members.map(function(m) { return m.id; }))); }}>전체 선택</button>
                 <button style={btnSmall({ background: "#F8FAFF", border: "1px solid #DDE4F0", borderRadius: 10 })} onClick={function() { setSelected(new Set()); }}>전체 해제</button>
               </div>
@@ -1711,6 +1765,51 @@ function AdminMission(props) {
             })}
             {selectedMembers.length > 12 && <NamePill name={"+" + (selectedMembers.length - 12)} submitted={false} />}
           </div>
+        </Modal>
+      )}
+
+      {missingOpen && (
+        <Modal onClose={function() { setMissingOpen(false); }} maxWidth={720}>
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#071C59", marginBottom: 8 }}>누락 후보 확인</div>
+          <div style={{ fontSize: 13, color: SUB, fontWeight: 800, lineHeight: 1.6, marginBottom: 14 }}>
+            학교 안에서 미션 배정 횟수가 가장 적은 부원입니다. 수동 선정이 필요하면 이름 옆 버튼으로 오늘 대상자에 추가할 수 있습니다.
+          </div>
+          {missingRotationRows.length === 0 ? (
+            <div style={{ padding: 20, borderRadius: 16, background: "#F8FAFF", color: SUB, fontSize: 13, fontWeight: 800, textAlign: "center" }}>현재 누락 후보가 없습니다.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 520, overflow: "auto" }}>
+              {missingRotationRows.map(function(row) {
+                return (
+                  <div key={row.school} style={{ border: "1px solid #E5EAF2", borderRadius: 16, padding: 14, background: "#fff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", marginBottom: 10 }}>
+                      <div style={{ fontSize: 15, fontWeight: 900, color: INK }}>{row.school}</div>
+                      <div style={{ fontSize: 11, color: "#C65A00", fontWeight: 900 }}>최소 {row.minCount}회 · 최대 {row.maxCount}회</div>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                      {row.candidates.map(function(m) {
+                        var on = selected.has(m.id);
+                        return (
+                          <button key={m.id} onClick={function() { toggleSelectedMember(m.id); }} style={{ border: "1px solid " + (on ? "#BDEDDC" : "#F6D8A8"), borderRadius: 999, background: on ? "#E8F8F2" : "#FFF7E8", color: on ? "#00A879" : "#C65A00", padding: "7px 10px", fontSize: 12, fontWeight: 900, fontFamily: FONT, cursor: "pointer" }}>
+                            {m.name} · {on ? "선택됨" : "대상 추가"}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {row.members.map(function(m) {
+                        var isCandidate = row.candidates.some(function(c) { return c.id === m.id; });
+                        return (
+                          <span key={m.id} style={{ borderRadius: 999, background: isCandidate ? "#FFF7E8" : "#F3F6FB", color: isCandidate ? "#C65A00" : "#66728A", padding: "5px 8px", fontSize: 11, fontWeight: 800 }}>
+                            {m.name} {m.mission_count}회
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </Modal>
       )}
     </div>
@@ -2517,6 +2616,7 @@ function AdminUncert() {
   var _statusReason = useState(""), statusReason = _statusReason[0], setStatusReason = _statusReason[1];
   var _statusBusy = useState(false), statusBusy = _statusBusy[0], setStatusBusy = _statusBusy[1];
   var _statusErr = useState(""), statusErr = _statusErr[0], setStatusErr = _statusErr[1];
+  var nowMs = useNowMs(60000);
 
   useEffect(function() {
     (async function() {
@@ -2549,8 +2649,10 @@ function AdminUncert() {
     return p.status === ST.PENDING || p.status === ST.MISSED || p.status === ST.REJECTED;
   });
   var remainingText = "잔여시간 -";
+  var dueOpen = false;
   if (mission && mission.due_at) {
-    var leftMs = new Date(mission.due_at).getTime() - Date.now();
+    var leftMs = new Date(mission.due_at).getTime() - nowMs;
+    dueOpen = leftMs > 0;
     if (leftMs > 0) {
       var leftH = Math.floor(leftMs / 3600000);
       var leftM = Math.floor((leftMs % 3600000) / 60000);
@@ -2738,7 +2840,7 @@ function AdminUncert() {
                 <div style={{ fontSize: 14, fontWeight: 900, color: INK }}>공지용 미인증자</div>
                 <div style={{ fontSize: 11, color: SUB, fontWeight: 800, marginTop: 2 }}>{uncertified.length}명</div>
               </div>
-              <div style={{ borderRadius: 999, background: mission && new Date(mission.due_at).getTime() > Date.now() ? "#E8F8F2" : "#FFF1F1", color: mission && new Date(mission.due_at).getTime() > Date.now() ? "#00A879" : "#E04848", padding: isMobile ? "6px 9px" : "8px 13px", fontSize: isMobile ? 11 : 13, fontWeight: 900, whiteSpace: "nowrap", flexShrink: 0 }}>{remainingText}</div>
+              <div style={{ borderRadius: 999, background: dueOpen ? "#E8F8F2" : "#FFF1F1", color: dueOpen ? "#00A879" : "#E04848", padding: isMobile ? "6px 9px" : "8px 13px", fontSize: isMobile ? 11 : 13, fontWeight: 900, whiteSpace: "nowrap", flexShrink: 0 }}>{remainingText}</div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: isMobile ? 5 : 8 }}>
               {uncertified.map(function(m) {
