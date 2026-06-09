@@ -75,6 +75,20 @@ function postBodyOf(mission) {
   if (!mission) return "";
   return mission.post_body || mission.body || "";
 }
+async function fetchVisibleMemberMission(today) {
+  var nowIso = new Date().toISOString();
+  var open = await supabase
+    .from("promotion_missions")
+    .select("*")
+    .eq("status", "active")
+    .lte("mission_date", today)
+    .gte("due_at", nowIso)
+    .order("due_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (open.data) return open;
+  return await supabase.from("promotion_missions").select("*").eq("mission_date", today).maybeSingle();
+}
 function fitFontSize(text, normal, min, threshold, step) {
   var len = String(text || "").replace(/\s/g, "").length;
   if (len <= threshold) return normal;
@@ -450,7 +464,7 @@ function MemberHome(props) {
 
   var load = useCallback(async function() {
     setLoading(true);
-    var r1 = await supabase.from("promotion_missions").select("*").eq("mission_date", today).maybeSingle();
+    var r1 = await fetchVisibleMemberMission(today);
     var missionRow = r1.data || null;
     setMission(missionRow);
     setMyAssignment(null); setMyProof(null); setAssignees([]);
@@ -748,7 +762,7 @@ function MemberCert(props) {
 
   var load = useCallback(async function() {
     setLoading(true);
-    var r1 = await supabase.from("promotion_missions").select("*").eq("mission_date", today).maybeSingle();
+    var r1 = await fetchVisibleMemberMission(today);
     var missionRow = r1.data || null;
     setMission(missionRow);
     setMyAssignment(null); setMyProof(null);
