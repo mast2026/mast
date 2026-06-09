@@ -440,6 +440,8 @@ function MemberHome(props) {
   var _myAssignment = useState(null), myAssignment = _myAssignment[0], setMyAssignment = _myAssignment[1];
   var _myProof = useState(null), myProof = _myProof[0], setMyProof = _myProof[1];
   var _assignees = useState([]), assignees = _assignees[0], setAssignees = _assignees[1];
+  var _members = useState([]), members = _members[0], setMembers = _members[1];
+  var _assignmentHistory = useState([]), assignmentHistory = _assignmentHistory[0], setAssignmentHistory = _assignmentHistory[1];
   var _records = useState([]), records = _records[0], setRecords = _records[1];
   var _loading = useState(true), loading = _loading[0], setLoading = _loading[1];
   var _showAllAssignees = useState(false), showAllAssignees = _showAllAssignees[0], setShowAllAssignees = _showAllAssignees[1];
@@ -452,6 +454,10 @@ function MemberHome(props) {
     var missionRow = r1.data || null;
     setMission(missionRow);
     setMyAssignment(null); setMyProof(null); setAssignees([]);
+    var rm = await supabase.from("members").select("id,name,gi,school,status");
+    setMembers((rm.data || []).filter(function(m) { return (m.status || "active") === "active"; }));
+    var rh = await supabase.from("promotion_assignment_status_view").select("member_id, member_name, gi, school, mission_date").lt("mission_date", today).order("mission_date", { ascending: false });
+    setAssignmentHistory(rh.data || []);
     if (missionRow) {
       var r2 = await supabase.from("promotion_mission_assignments").select("*").eq("member_id", memberId).eq("mission_id", missionRow.id).maybeSingle();
       setMyAssignment(r2.data || null);
@@ -485,13 +491,81 @@ function MemberHome(props) {
       dueLeftText = "마감 시간이 지났어요";
     }
   }
-  var schoolGroups = [];
-  assignees.forEach(function(a) {
-    var group = schoolGroups.find(function(g) { return g.school === a.school; });
-    if (!group) { group = { school: a.school, people: [] }; schoolGroups.push(group); }
-    group.people.push(a);
+  var assigneeMap = {};
+  assignees.forEach(function(a) { assigneeMap[a.member_id] = a; });
+  function rotationOrderedMembers(schoolMembers, todayPeople, historyRows) {
+    var sorted = sortMembersByKoreanName(schoolMembers);
+    if (!sorted.length) return [];
+    var startId = todayPeople[0] ? todayPeople[0].member_id : "";
+    if (!startId && historyRows[0]) {
+      var lastIndex = sorted.findIndex(function(m) { return m.id === historyRows[0].member_id; });
+      startId = sorted[(lastIndex + 1 + sorted.length) % sorted.length].id;
+    }
+    var startIndex = Math.max(0, sorted.findIndex(function(m) { return m.id === startId; }));
+    return sorted.slice(startIndex).concat(sorted.slice(0, startIndex));
+  }
+  function daysUntilMemberTurn(schoolMembers, todayPeople, historyRows, targetId) {
+    var sorted = sortMembersByKoreanName(schoolMembers);
+    if (!sorted.length || !targetId) return null;
+    if (todayPeople.some(function(a) { return a.member_id === targetId; })) return 0;
+    var last = historyRows[0] || null;
+    if (sorted.length === 1) {
+      if (!last) return 0;
+      return Math.max(0, 3 - daysBetweenKST(last.mission_date, today));
+    }
+    if (sorted.length === 2) {
+      var first = sorted[0], second = sorted[1];
+      var todayTarget = todayPeople[0] ? todayPeople[0].member_id : "";
+      if (todayTarget === first.id) return targetId === second.id ? 1 : 0;
+      if (todayTarget === second.id) return targetId === first.id ? 2 : 0;
+      if (!last) return targetId === first.id ? 0 : 1;
+      var passed = daysBetweenKST(last.mission_date, today);
+      if (last.member_id === first.id) {
+        return targetId === second.id ? Math.max(0, 1 - passed) : Math.max(0, 3 - passed);
+      }
+      if (last.member_id === second.id) {
+        return targetId === first.id ? Math.max(0, 2 - passed) : Math.max(0, 3 - passed);
+      }
+    }
+    var ordered = rotationOrderedMembers(sorted, todayPeople, historyRows);
+    var idx = ordered.findIndex(function(m) { return m.id === targetId; });
+    return idx < 0 ? null : idx;
+  }
+  function estimateMyTurnDays() {
+    var mySchoolMembers = members.filter(function(m) { return schoolKey(m.school) === schoolKey(session.member.school); });
+    if (!mySchoolMembers.length) return null;
+    var todayPeople = assignees.filter(function(a) { return schoolKey(a.school) === schoolKey(session.member.school); });
+    var historyRows = assignmentHistory.filter(function(a) { return schoolKey(a.school) === schoolKey(session.member.school); });
+    return daysUntilMemberTurn(mySchoolMembers, todayPeople, historyRows, memberId);
+  }
+  var myTurnDays = estimateMyTurnDays();
+  var myTurnText = isAssignee ? "오늘 내 순번이에요" : (myTurnDays == null ? "내 순번 계산 중" : "내 순번까지 약 " + myTurnDays + "일");
+  var schoolKeys = {};
+  assignees.forEach(function(a) { schoolKeys[schoolKey(a.school)] = a.school; });
+  if (session.member.school) schoolKeys[schoolKey(session.member.school)] = session.member.school;
+  var schoolGroups = Object.keys(schoolKeys).map(function(key) {
+    var schoolMembers = members.filter(function(m) { return schoolKey(m.school) === key; });
+    var todayPeople = assignees.filter(function(a) { return schoolKey(a.school) === key; });
+    var historyRows = assignmentHistory.filter(function(a) { return schoolKey(a.school) === key; });
+    var orderedMembers = rotationOrderedMembers(schoolMembers, todayPeople, historyRows).map(function(m, idx) {
+      var a = assigneeMap[m.id];
+      return {
+        member_id: m.id,
+        member_name: m.name,
+        gi: m.gi,
+        school: m.school,
+        status: a ? a.status : null,
+        isTodayTarget: !!a,
+        orderNo: idx + 1,
+        daysUntilTurn: daysUntilMemberTurn(schoolMembers, todayPeople, historyRows, m.id)
+      };
+    });
+    return { school: schoolKeys[key], people: orderedMembers, todayCount: todayPeople.length, isMySchool: key === schoolKey(session.member.school) };
+  }).filter(function(g) { return g.people.length; });
+  schoolGroups.sort(function(a, b) {
+    if (a.isMySchool !== b.isMySchool) return a.isMySchool ? -1 : 1;
+    return String(a.school || "").localeCompare(String(b.school || ""), "ko");
   });
-  schoolGroups.sort(function(a, b) { return b.people.length - a.people.length; });
   var visibleSchoolGroups = showAllAssignees ? schoolGroups : schoolGroups.slice(0, 3);
   var hasSubmittedMine = myProof || submittedStatuses.indexOf(myStatus) !== -1;
 
@@ -524,7 +598,7 @@ function MemberHome(props) {
         </div>
       ) : (
         <div style={homeHeroCard()}>
-          <img src={assets.hero.megaphone} alt="" style={{ position: "absolute", zIndex: 1, left: 10, top: 2, width: 244, height: "auto", objectFit: "contain", opacity: 1, pointerEvents: "none", filter: "drop-shadow(0 18px 30px rgba(58,105,220,0.18))" }} />
+          <img src={assets.hero.megaphone} alt="" style={{ position: "absolute", zIndex: 1, left: 10, top: 34, width: 244, height: "auto", objectFit: "contain", opacity: 1, pointerEvents: "none", filter: "drop-shadow(0 18px 30px rgba(58,105,220,0.18))" }} />
           <div style={{ position: "absolute", zIndex: 3, right: 12, top: 20, left: 168, textAlign: "center" }}>
             <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minHeight: 32, padding: "0 12px", borderRadius: 16, background: "#F1FFF8", color: "#00A879", fontSize: fitFontSize("오늘 홍보 미션 · " + fmtShortDate(today), 15, 12, 12, 4), lineHeight: "20px", fontWeight: 900, whiteSpace: "nowrap" }}>오늘 홍보 미션 · {fmtShortDate(today)}</div>
           </div>
@@ -534,7 +608,8 @@ function MemberHome(props) {
             <div style={{ marginTop: 5, fontSize: fitFontSize(mission.title, 12, 9, 13, 5), lineHeight: "16px", color: "#6F7D99", fontWeight: 900, display: "flex", alignItems: "flex-start", justifyContent: "center", gap: 5, wordBreak: "keep-all" }}>
               <IconAttach color="#6D93EA" /> <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{mission.title}</span>
             </div>
-            <button onClick={function() { props.onTab(isAssignee ? "cert" : "record"); }} style={{ marginTop: 9, width: 142, height: 48, border: "none", borderRadius: 16, background: isAssignee ? "#0869F4" : "#E8F0FE", color: isAssignee ? "#fff" : "#0869F4", fontSize: 16, fontWeight: 900, fontFamily: FONT, boxShadow: isAssignee ? "0 12px 24px rgba(8,105,244,0.22)" : "none", cursor: "pointer" }}>
+            {!isAssignee && <div style={{ margin: "5px auto 0", display: "inline-flex", alignItems: "center", justifyContent: "center", minHeight: 24, padding: "0 10px", borderRadius: 999, background: "#F3F6FB", color: "#66728A", fontSize: 11, lineHeight: "16px", fontWeight: 900, maxWidth: "100%", whiteSpace: "nowrap" }}>{myTurnText}</div>}
+            <button onClick={function() { props.onTab(isAssignee ? "cert" : "record"); }} style={{ marginTop: 7, width: 142, height: 48, border: "none", borderRadius: 16, background: isAssignee ? "#0869F4" : "#E8F0FE", color: isAssignee ? "#fff" : "#0869F4", fontSize: 16, fontWeight: 900, fontFamily: FONT, boxShadow: isAssignee ? "0 12px 24px rgba(8,105,244,0.22)" : "none", cursor: "pointer" }}>
               {isAssignee ? "인증하기" : "내 기록"} <span style={{ marginLeft: 10, fontSize: 26, lineHeight: 0 }}>›</span>
             </button>
           </div>
@@ -543,6 +618,14 @@ function MemberHome(props) {
 
       {mission && isAssignee && (
         <>
+          <div style={homeCard({ padding: "11px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid #FFE2B8", background: "linear-gradient(135deg, #FFF8EC 0%, #FFF3F2 100%)", boxShadow: "0 10px 24px rgba(224,90,0,0.08)" })}>
+            <div style={{ width: 28, height: 28, borderRadius: "50%", background: "#FFE2B8", color: "#E05A00", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 900, flexShrink: 0 }}>!</div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, lineHeight: "17px", fontWeight: 900, color: "#C45100" }}>게시판 선택 주의</div>
+              <div style={{ fontSize: 12, lineHeight: "17px", fontWeight: 800, color: "#4A5568", wordBreak: "keep-all" }}>홍보글은 반드시 동아리/홍보 게시판에만 올려주세요. 다른 게시판 업로드는 신고 대상이 될 수 있습니다.</div>
+            </div>
+          </div>
+
           <div style={homeCard({ padding: 14 })}>
             <div style={{ fontSize: 14, fontWeight: 900, color: "#08235E", marginBottom: 9 }}>게시물 내용</div>
             <div style={{ fontSize: fitFontSize(postTitleOf(mission), 12, 10, 18, 7), lineHeight: "18px", color: SUB, fontWeight: 800, marginBottom: 10, whiteSpace: "normal", overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "keep-all" }}>{postTitleOf(mission) || "게시물 제목 없음"}</div>
@@ -595,28 +678,39 @@ function MemberHome(props) {
       )}
 
       {mission && (
-        <div style={homeCard({ padding: "18px 12px 14px" })}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBottom: 12, borderBottom: "1px solid #E9EEF7" }}>
+        <div style={homeCard({ padding: "16px 12px 12px" })}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, paddingBottom: 10, borderBottom: "1px solid #E9EEF7" }}>
             <div style={{ fontSize: 18, fontWeight: 900, color: "#08235E" }}>오늘 대상자 명단 <span style={{ color: "#7C88A0" }}>({assignees.length}명)</span></div>
-            <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 13, fontWeight: 800, color: "#66728A" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, fontWeight: 800, color: "#66728A", whiteSpace: "nowrap" }}>
               <span><IconDot color="#10B888" size={8} /> 제출 {submittedCount}명</span>
               <span><IconDot color="#A9B2C4" size={8} /> 미제출 {missingCount}명</span>
             </div>
           </div>
           {visibleSchoolGroups.map(function(group, idx) {
             return (
-              <div key={group.school} style={{ padding: "14px 0 12px", borderBottom: idx === Math.min(visibleSchoolGroups.length - 1, visibleSchoolGroups.length - 1) ? "none" : "1px solid #EEF2F8" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                  <IconSchoolSolid type={idx === 1 ? "cap" : "school"} />
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#66728A", flex: 1 }}>{group.school}</div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#9AA3B2" }}>({group.people.length}명)</div>
-                  <div style={{ fontSize: 24, color: "#8A96AB", lineHeight: 1 }}>⌄</div>
+              <div key={group.school} style={{ padding: "10px 0", borderBottom: idx === Math.min(visibleSchoolGroups.length - 1, visibleSchoolGroups.length - 1) ? "none" : "1px solid #EEF2F8" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                  <IconSchoolSolid type="school" />
+                  <div style={{ fontSize: 13, fontWeight: 900, color: "#08235E", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.school}</div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: group.isMySchool ? "#0869F4" : "#7C88A0" }}>{group.isMySchool ? "내 학교 · " : ""}{group.people.length}명</div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 8, paddingLeft: 34 }}>
-                  {(showAllAssignees ? group.people : group.people.slice(0, 5)).map(function(p) {
+                <div style={{ display: "flex", gap: 5, overflowX: "auto", padding: "1px 2px 5px", scrollSnapType: "x proximity", WebkitOverflowScrolling: "touch" }}>
+                  {group.people.map(function(p) {
                     var mine = p.member_id === memberId;
+                    var isTodayTarget = !!p.isTodayTarget;
                     var submitted = submittedStatuses.indexOf(p.status) !== -1;
-                    return <NamePill key={p.member_id} name={p.member_name} mine={mine} submitted={submitted} />;
+                    return (
+                      <div key={p.member_id} style={{ width: 72, minWidth: 72, minHeight: 42, borderRadius: 11, background: isTodayTarget ? (mine ? "#E8F8F2" : "#EEF5FF") : "#F8FAFF", border: isTodayTarget ? (mine ? "1px solid #BDEDDC" : "1px solid #CFE0FF") : "1px solid #EEF2F8", padding: "5px 6px", display: "grid", gridTemplateRows: "auto auto", gap: 2, scrollSnapAlign: "start" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 3, minWidth: 0 }}>
+                          <span style={{ width: 16, height: 16, borderRadius: "50%", background: isTodayTarget ? (mine ? "#00A879" : "#0869F4") : "#E8EEF8", color: isTodayTarget ? "#fff" : "#66728A", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 8, fontWeight: 900, flexShrink: 0 }}>{p.orderNo}</span>
+                          <span style={{ minWidth: 0, fontSize: 12, lineHeight: "15px", fontWeight: 900, color: mine ? "#00A879" : (isTodayTarget ? "#0869F4" : "#08235E"), overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.member_name}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 3 }}>
+                          {mine ? <span style={{ borderRadius: 999, background: "#DDF7EE", color: "#00A879", padding: "1px 4px", fontSize: 8, fontWeight: 900 }}>나</span> : <span />}
+                          <span style={{ borderRadius: 999, background: isTodayTarget ? (submitted ? "#E8F8F2" : "#EAF2FF") : "#EEF2F8", color: isTodayTarget ? (submitted ? "#00A879" : "#0869F4") : "#7C88A0", padding: "1px 5px", fontSize: 9, fontWeight: 900 }}>{isTodayTarget ? (submitted ? "제출" : "오늘") : (p.daysUntilTurn + "일")}</span>
+                        </div>
+                      </div>
+                    );
                   })}
                 </div>
               </div>
